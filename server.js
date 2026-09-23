@@ -20,13 +20,24 @@ const pool = new Pool({
 app.get('/api/items', async (req, res) => {
     try {
         const result = await pool.query(`
-      SELECT items.*, categories.category_name, users.full_name AS lender_name 
-      FROM items
-      LEFT JOIN categories ON items.category_id = categories.category_id
-      LEFT JOIN users ON items.lender_id = users.user_id
-      ORDER BY items.created_at DESC
-    `);
-        res.json(result.rows);
+            SELECT items.*, categories.category_name, users.full_name AS lender_name 
+            FROM items
+            LEFT JOIN categories ON items.category_id = categories.category_id
+            LEFT JOIN users ON items.lender_id = users.user_id
+            ORDER BY items.created_at DESC
+        `);
+
+        // เพิ่มการแนบระยะทาง (Distance) เข้าไปในสินค้าแต่ละชิ้น
+        const itemsWithDistance = result.rows.map(item => {
+            // สุ่มระยะทางสมจริงระหว่าง 0.8 ถึง 4.5 กิโลเมตร (หรือจะกำหนดเลขตายตัวก็ได้ครับ)
+            const mockDistance = (Math.random() * 3.7 + 0.8).toFixed(1);
+            return {
+                ...item,
+                distance: mockDistance
+            };
+        });
+
+        res.json(itemsWithDistance);
     } catch (err) {
         console.error(err);
         res.status(500).send('Database Error');
@@ -85,6 +96,57 @@ app.use('/api/agreements', agreementsRouter(pool));
 app.use('/api/chats', chatsRouter(pool));
 app.use('/api/notifications', notificationsRouter(pool));
 
+app.get('/api/items/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const result = await pool.query(`
+            SELECT items.*, categories.category_name, users.full_name AS lender_name 
+            FROM items
+            LEFT JOIN categories ON items.category_id = categories.category_id
+            LEFT JOIN users ON items.lender_id = users.user_id
+            WHERE items::text LIKE '%' || $1 || '%'
+            LIMIT 1
+        `, [id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).send('Item not found');
+        }
+
+        const rawItem = result.rows[0];
+
+        // ดึงค่ารูปจากฟิลด์ที่เป็นไปได้
+        let imgPath = rawItem.image_url || rawItem.image || rawItem.photo;
+        if (Array.isArray(rawItem.images)) {
+            imgPath = rawItem.images[0];
+        }
+
+        // ถ้ามีชื่อไฟล์แต่ไม่ได้ขึ้นต้นด้วย http ให้เติม /uploads/ หรือ path ที่ถูกต้อง
+        if (imgPath && !imgPath.startsWith('http') && !imgPath.startsWith('/')) {
+            imgPath = `/uploads/${imgPath}`;
+        }
+
+        // ถ้าไม่มีรูปเลย ให้ใส่รูป Placeholder สำรองไว้ก่อนเพื่อความชัวร์
+        const finalImage = imgPath || 'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?w=500';
+
+        const item = {
+            ...rawItem,
+            image_url: finalImage,
+            image: finalImage,
+            images: [finalImage],
+            distance: (Math.random() * 3.7 + 0.8).toFixed(1)
+        };
+
+        res.json(item);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Database Error');
+    }
+});
+// 6. เส้นดึงรีวิวสินค้า (ส่งค่า Array ว่างกลับไปเพื่อกัน Error 404)
+app.get('/api/items/:id/reviews', async (req, res) => {
+    res.json([]);
+});
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
