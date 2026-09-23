@@ -2,25 +2,19 @@ require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// เปิดให้เข้าถึงโฟลเดอร์ uploads ได้ผ่าน http://localhost:5000/uploads/...
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 // สร้าง Database Connection Pool
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
 });
-
-// Import Routes จากโฟลเดอร์ routes
-const verificationsRouter = require('./routes/verifications');
-const agreementsRouter = require('./routes/agreements');
-const chatsRouter = require('./routes/chats');
-const notificationsRouter = require('./routes/notifications');
-
-// ----------------------------------------------------
-// Existing Routes (ระบบเดิมที่คุณเขียนไว้)
-// ----------------------------------------------------
 
 // 1. ดึงรายการสินค้าทั้งหมด (Items)
 app.get('/api/items', async (req, res) => {
@@ -80,9 +74,12 @@ app.get('/api/users', async (req, res) => {
     }
 });
 
-// ----------------------------------------------------
-// New Feature Routes (ส่งผ่าน pool ให้แต่ละ Route)
-// ----------------------------------------------------
+// Import Routes จากโฟลเดอร์ routes
+const verificationsRouter = require('./routes/verifications');
+const agreementsRouter = require('./routes/agreements');
+const chatsRouter = require('./routes/chats');
+const notificationsRouter = require('./routes/notifications');
+
 app.use('/api/verifications', verificationsRouter(pool));
 app.use('/api/agreements', agreementsRouter(pool));
 app.use('/api/chats', chatsRouter(pool));
