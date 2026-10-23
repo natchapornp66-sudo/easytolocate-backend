@@ -14,7 +14,12 @@ module.exports = (pool) => {
             );
             res.status(201).json({ success: true, data: result.rows[0] });
         } catch (err) {
-            res.status(500).json({ success: false, error: err.message });
+            console.error('Create verification error:', err);
+
+            res.status(500).json({
+                success: false,
+                error: 'เกิดข้อผิดพลาดในการส่งข้อมูลยืนยันตัวตน'
+            });
         }
     });
 
@@ -28,7 +33,12 @@ module.exports = (pool) => {
             );
             res.json({ success: true, data: result.rows[0] || null });
         } catch (err) {
-            res.status(500).json({ success: false, error: err.message });
+            console.error('Get verification status error:', err);
+
+            res.status(500).json({
+                success: false,
+                error: 'ไม่สามารถตรวจสอบสถานะการยืนยันตัวตนได้'
+            });
         }
     });
 
