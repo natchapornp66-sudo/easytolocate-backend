@@ -11,3 +11,15 @@ node_modules/
 
 # User uploaded files
 uploads/
+uploads-backup/
+
+# Local audit snapshots, test fixtures and generated release/backup artifacts
+.audit*/
+.backups/
+.deploy-test/
+public-app/
+*-regression-result.json
+*-before-fix.json
+*-after-fix.json
+*-ui-fixture.json
+rental-audit*.json

@@ -2,8 +2,54 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const authenticateToken = require('../middleware/authMiddleware');
 
 module.exports = (pool) => {
+    router.get('/me', authenticateToken, async (req, res) => {
+        try {
+            const result = await pool.query(`
+                SELECT user_id, full_name, email, phone_number, trust_score, role, status, created_at
+                FROM users WHERE user_id = $1
+            `, [req.user.userId]);
+            const completed = await pool.query(`
+                SELECT COUNT(*)::int AS total FROM rentals r JOIN items i ON i.item_id = r.item_id
+                WHERE r.status = 'completed' AND (r.borrower_id = $1 OR i.lender_id = $1)
+            `, [req.user.userId]);
+            const reviews = await pool.query(`
+                SELECT rv.review_id AS id, rv.reviewer_id, rv.reviewee_id, rv.rating,
+                       rv.comment, rv.created_at, i.title AS item_title, u.full_name AS reviewer_name
+                FROM reviews rv LEFT JOIN rentals r ON r.rental_id = rv.rental_id
+                LEFT JOIN items i ON i.item_id = r.item_id
+                LEFT JOIN users u ON u.user_id = rv.reviewer_id
+                WHERE rv.reviewer_id = $1 OR rv.reviewee_id = $1 ORDER BY rv.created_at DESC
+            `, [req.user.userId]);
+            return res.json({ success: true, data: {
+                ...result.rows[0], trust_score: Number(result.rows[0].trust_score || 0),
+                completed_count: completed.rows[0].total, reviews: reviews.rows
+            } });
+        } catch (error) {
+            console.error('Get profile error:', error.message);
+            return res.status(500).json({ success: false, error: 'ไม่สามารถโหลดโปรไฟล์ได้' });
+        }
+    });
+    router.patch('/me', authenticateToken, async (req, res) => {
+        const { full_name, phone_number } = req.body || {};
+        if (Object.keys(req.body || {}).some(key => !['full_name', 'phone_number'].includes(key)) ||
+            typeof full_name !== 'string' || !full_name.trim() || full_name.trim().length > 100 ||
+            typeof phone_number !== 'string' || (phone_number !== '' && !/^[0-9]{9,15}$/.test(phone_number))) {
+            return res.status(400).json({ success: false, error: 'กรุณาระบุชื่อและเบอร์โทรศัพท์ให้ถูกต้อง' });
+        }
+        try {
+            const result = await pool.query(`
+                UPDATE users SET full_name = $1, phone_number = $2, updated_at = NOW()
+                WHERE user_id = $3 RETURNING user_id, full_name, email, phone_number
+            `, [full_name.trim(), phone_number || null, req.user.userId]);
+            return res.json({ success: true, data: result.rows[0] });
+        } catch (error) {
+            console.error('Update profile error:', error.message);
+            return res.status(500).json({ success: false, error: 'ไม่สามารถบันทึกโปรไฟล์ได้' });
+        }
+    });
     // 1. API สมัครสมาชิก
     router.post('/register', async (req, res) => {
         const { full_name, email, phone_number, password } = req.body;

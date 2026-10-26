@@ -37,6 +37,9 @@ module.exports = (pool) => {
     router.patch('/:notification_id/read', async (req, res) => {
         const { notification_id } = req.params;
         const userId = req.user.userId;
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(notification_id)) {
+            return res.status(400).json({ success: false, error: 'รหัสการแจ้งเตือนไม่ถูกต้อง' });
+        }
 
         try {
             const result = await pool.query(

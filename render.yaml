@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: easytolocate-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: npm run start:render
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.13.0
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: SERVE_FRONTEND
+        value: "false"
+      - key: STORAGE_DRIVER
+        value: supabase
+      - key: UPLOAD_DIR
+        value: /tmp/easytolocate-uploads
+      - key: SUPABASE_STORAGE_BUCKET
+        value: easytolocate-files
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: DB_SSL
+        value: "true"
+      - key: FRONTEND_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

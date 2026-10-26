@@ -2,9 +2,19 @@
   "name": "easytolocatebackend",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "start:render": "node scripts/render-start.cjs",
+    "prepare:release": "node scripts/prepare-release.cjs",
+    "db:init": "node scripts/database.cjs --init",
+    "db:check": "node scripts/database.cjs",
+    "db:export": "node scripts/export-schema.cjs",
+    "test": "node --test tests/deploy-config.test.cjs tests/storage.test.cjs",
+    "backup": "node scripts/backup.cjs",
+    "test:deploy": "node tests/deploy-smoke.cjs",
+    "test:cloud": "node tests/deploy-smoke.cjs --cloud",
+    "admin:grant": "node scripts/grant-admin.cjs"
   },
   "keywords": [],
   "author": "",

@@ -1,13 +1,31 @@
-require('dotenv').config();
+const { production, uploadRoot, frontendDist, serveFrontend, allowedOrigins, validateProduction } = require('./config');
+validateProduction();
 const express = require('express');
-const { Pool } = require('pg');
+const pool = require('./db');
 const cors = require('cors');
 const path = require('path');
 const multer = require('multer');
 const fs = require('fs');
 const crypto = require('crypto');
+const storage = require('./storage');
 
-const reviewUploadDir = path.join(__dirname, 'uploads', 'reviews');
+const validItemPrice = price => Number.isFinite(price) && price > 0 &&
+    price <= 99999999.99 && Math.abs(Math.round(price * 100) - price * 100) < 0.000001;
+const validItemImages = images => Array.isArray(images) && images.length <= 5 && images.every(url =>
+    typeof url === 'string' && url.length <= 2048 &&
+    (/^\/uploads\/items\/[0-9a-f-]{36}\.(jpg|png|webp|gif)$/i.test(url) || /^https?:\/\/[^\s]+$/i.test(url)));
+const validItemImageFile = file => {
+    const fd = fs.openSync(file.path, 'r');
+    try {
+        const b = Buffer.alloc(12), n = fs.readSync(fd, b, 0, 12, 0);
+        if (file.mimetype === 'image/png') return n >= 8 && b.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'));
+        if (file.mimetype === 'image/jpeg') return n >= 3 && b[0] === 255 && b[1] === 216 && b[2] === 255;
+        if (file.mimetype === 'image/gif') return ['GIF87a', 'GIF89a'].includes(b.toString('ascii', 0, 6));
+        return file.mimetype === 'image/webp' && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP';
+    } finally { fs.closeSync(fd); }
+};
+
+const reviewUploadDir = path.join(uploadRoot, 'reviews');
 fs.mkdirSync(reviewUploadDir, { recursive: true });
 
 const reviewStorage = multer.diskStorage({
@@ -48,17 +66,25 @@ const reviewUpload = multer({
 
 const authenticateToken = require('./middleware/authMiddleware');
 const app = express();
-app.use(cors());
+app.use(storage.cleanupTemporaryUploads);
+app.disable('x-powered-by');
+if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
+app.use(cors({
+    origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin))
+}));
 app.use(express.json());
+app.use((req, res, next) => { res.setHeader('X-Content-Type-Options', 'nosniff'); next(); });
 
 // เปิดให้เข้าถึงโฟลเดอร์ uploads ได้ผ่าน http://localhost:5000/uploads/...
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// เปิดเฉพาะรูปสิ่งของและรีวิวที่เป็นข้อมูลสาธารณะ
+if (storage.cloud) app.get('/uploads/items/:filename', (req, res) => storage.send(res, 'items', req.params.filename).catch(() => res.status(404).end()));
+else app.use('/uploads/items', express.static(path.join(uploadRoot, 'items')));
+
+if (storage.cloud) app.get('/uploads/reviews/:filename', (req, res) => storage.send(res, 'reviews', req.params.filename).catch(() => res.status(404).end()));
+else app.use('/uploads/reviews', express.static(path.join(uploadRoot, 'reviews')));
 
 // สร้าง Database Connection Pool
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-});
-const itemUploadDir = path.join(__dirname, 'uploads', 'items');
+const itemUploadDir = path.join(uploadRoot, 'items');
 
 fs.mkdirSync(itemUploadDir, { recursive: true });
 
@@ -101,7 +127,7 @@ const itemImageUpload = multer({
 });
 
 // ===== Rental inspection photo upload =====
-const rentalPhotoDir = path.join(__dirname, 'uploads', 'rentals');
+const rentalPhotoDir = path.join(uploadRoot, 'rentals');
 
 fs.mkdirSync(rentalPhotoDir, { recursive: true });
 
@@ -241,6 +267,7 @@ app.post(
                 }
             }
 
+            await storage.persist('rentals', req.files);
             // 4. สร้าง URL รูปภาพ
             const imageUrls = req.files.map(file =>
                 `/uploads/rentals/${file.filename}`
@@ -350,7 +377,7 @@ app.get('/api/items', async (req, res) => {
 
         const itemsWithDistance = result.rows.map((item) => ({
             ...item,
-            distance_km: Number((Math.random() * 3.7 + 0.8).toFixed(1))
+            distance_km: null
         }));
 
         res.json(itemsWithDistance);
@@ -369,9 +396,11 @@ app.get('/api/items', async (req, res) => {
 // อัปโหลดรูปภาพสินค้า สูงสุด 5 รูป
 // =====================================
 
-app.post('/api/upload/item-images', (req, res) => {
-    itemImageUpload.array('images', 5)(req, res, (err) => {
+app.post('/api/upload/item-images', authenticateToken, (req, res) => {
+    itemImageUpload.array('images', 5)(req, res, async (err) => {
+        const cleanup = () => Promise.all((req.files || []).map(file => fs.promises.unlink(file.path).catch(() => {})));
         if (err) {
+            await cleanup();
             console.error('Item image upload error:', err);
 
             return res.status(400).json({
@@ -390,12 +419,22 @@ app.post('/api/upload/item-images', (req, res) => {
         const imageUrls = req.files.map(
             (file) => `/uploads/items/${file.filename}`
         );
+        try {
+            if (!req.files.every(validItemImageFile)) {
+                await cleanup();
+                return res.status(400).json({ success: false, error: 'พบไฟล์ที่ไม่ใช่รูปภาพตามประเภทที่ระบุ' });
+            }
+        } catch (error) {
+            await cleanup();
+            return res.status(400).json({ success: false, error: 'ไม่สามารถตรวจสอบรูปภาพได้' });
+        }
 
-        return res.status(201).json({
-            success: true,
-            message: 'อัปโหลดรูปภาพสำเร็จ',
-            images: imageUrls,
-        });
+        try {
+            await storage.persist('items', req.files);
+            return res.status(201).json({ success: true, message: 'อัปโหลดรูปภาพสำเร็จ', images: imageUrls });
+        } catch {
+            return res.status(502).json({ success: false, error: 'ไม่สามารถบันทึกรูปภาพได้ กรุณาลองใหม่' });
+        }
     });
 });
 
@@ -451,12 +490,12 @@ app.put('/api/items/:id', authenticateToken, async (req, res) => {
         if (
             typeof title !== 'string' ||
             !title.trim() ||
+            title.trim().length > 255 ||
             typeof description !== 'string' ||
             !description.trim() ||
             typeof conditions !== 'string' ||
             !conditions.trim() ||
-            !Number.isFinite(price) ||
-            price <= 0
+            !validItemPrice(price)
         ) {
             return res.status(400).json({
                 success: false,
@@ -521,6 +560,7 @@ app.put('/api/items/:id', authenticateToken, async (req, res) => {
 
 // API ลบโพสต์สินค้า (เฉพาะเจ้าของโพสต์)
 app.delete('/api/items/:id', authenticateToken, async (req, res) => {
+    let client;
     try {
         const itemId = req.params.id;
         const userId = req.user.userId;
@@ -536,20 +576,27 @@ app.delete('/api/items/:id', authenticateToken, async (req, res) => {
             });
         }
 
-        // ลบเฉพาะสินค้าที่เป็นของผู้ใช้ที่ล็อกอิน
-        const result = await pool.query(`
+        client = await pool.connect();
+        await client.query('BEGIN');
+        const owned = await client.query('SELECT item_id FROM items WHERE item_id=$1 AND lender_id=$2 FOR UPDATE', [itemId, userId]);
+        if (!owned.rows.length) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ success: false, error: 'ไม่พบสินค้าหรือคุณไม่มีสิทธิ์ลบ' });
+        }
+        const history = await client.query('SELECT 1 FROM rentals WHERE item_id=$1 LIMIT 1', [itemId]);
+        if (history.rows.length) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ success: false, error: 'สินค้านี้มีประวัติการเช่าแล้ว กรุณาปิดให้เช่าแทนการลบเพื่อรักษาประวัติ' });
+        }
+        // Lock the item first, matching rental creation, so a new rental cannot be deleted by a concurrent request.
+        const result = await client.query(`
             DELETE FROM items
             WHERE item_id = $1
               AND lender_id = $2
             RETURNING item_id, title
         `, [itemId, userId]);
 
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                error: 'ไม่พบสินค้าหรือคุณไม่มีสิทธิ์ลบ'
-            });
-        }
+        await client.query('COMMIT');
 
         return res.json({
             success: true,
@@ -558,13 +605,14 @@ app.delete('/api/items/:id', authenticateToken, async (req, res) => {
         });
 
     } catch (err) {
+        if (client) await client.query('ROLLBACK').catch(() => {});
         console.error('DELETE /api/items/:id error:', err);
 
         return res.status(500).json({
             success: false,
             error: 'ไม่สามารถลบโพสต์ได้'
         });
-    }
+    } finally { if (client) client.release(); }
 });
 
 // API เปิด/ปิดการให้เช่าสินค้า
@@ -601,10 +649,18 @@ app.patch('/api/items/:id/status', authenticateToken, async (req, res) => {
                 updated_at = NOW()
             WHERE item_id = $2
               AND lender_id = $3
+              AND status <> 'hidden'
             RETURNING item_id, title, status, updated_at
         `, [status, itemId, userId]);
 
         if (result.rows.length === 0) {
+            const hiddenItem = await pool.query(
+                `SELECT 1 FROM items WHERE item_id = $1 AND lender_id = $2 AND status = 'hidden'`,
+                [itemId, userId]
+            );
+            if (hiddenItem.rows.length) {
+                return res.status(403).json({ success: false, error: 'ประกาศนี้ถูกซ่อนโดยผู้ดูแล กรุณาติดต่อผู้ดูแลระบบ' });
+            }
             return res.status(404).json({
                 success: false,
                 error: 'ไม่พบสินค้าหรือคุณไม่มีสิทธิ์แก้ไขสถานะ'
@@ -630,10 +686,11 @@ app.patch('/api/items/:id/status', authenticateToken, async (req, res) => {
 });
 
 // POST /api/items - เพิ่มสิ่งของให้เช่า
-app.post('/api/items', async (req, res) => {
+app.post('/api/items', authenticateToken, async (req, res) => {
     try {
+        const lender_id = req.user.userId;
         const {
-            lender_id,
+
             category_id,
             title,
             description,
@@ -647,18 +704,19 @@ app.post('/api/items', async (req, res) => {
             clothing_length
         } = req.body;
 
+
         const price = Number(daily_price);
         const categoryId = Number(category_id);
 
         if (
             !lender_id ||
-            !title?.trim() ||
-            !description?.trim() ||
-            !conditions?.trim() ||
+            typeof title !== 'string' || !title.trim() || title.trim().length > 255 ||
+            typeof description !== 'string' || !description.trim() ||
+            typeof conditions !== 'string' || !conditions.trim() ||
             !Number.isInteger(categoryId) ||
             categoryId <= 0 ||
-            !Number.isFinite(price) ||
-            price <= 0
+            !validItemPrice(price) ||
+            (images !== undefined && !validItemImages(images))
         ) {
             return res.status(400).json({
                 success: false,
@@ -666,6 +724,10 @@ app.post('/api/items', async (req, res) => {
             });
         }
 
+        const categoryExists = await pool.query('SELECT 1 FROM categories WHERE category_id = $1', [categoryId]);
+        if (!categoryExists.rows.length) {
+            return res.status(400).json({ success: false, error: 'ไม่พบหมวดหมู่ที่เลือก' });
+        }
         // แปลงค่าขนาดเสื้อผ้าเป็นตัวเลข หรือ NULL หากไม่ได้กรอก
         const parseSize = (value) => {
             if (value === undefined || value === null || value === '') {
@@ -765,9 +827,10 @@ app.get('/api/categories', async (req, res) => {
 });
 
 // 3. ดึงรายการเช่าทั้งหมด (Rentals)
-app.get('/api/rentals', async (req, res) => {
+app.get('/api/rentals', authenticateToken, async (req, res) => {
     try {
-        const { view, userId } = req.query;
+        const { view } = req.query;
+        const userId = req.user.userId;
 
         let query = `
       SELECT
@@ -847,8 +910,7 @@ app.get('/api/rentals', async (req, res) => {
             }
 
             if (imagePath && !imagePath.startsWith('http')) {
-                imagePath = `http://localhost:5000${imagePath.startsWith('/') ? imagePath : `/uploads/${imagePath}`
-                    }`;
+                imagePath = imagePath.startsWith('/') ? imagePath : `/uploads/${imagePath}`;
             }
 
             return {
@@ -975,6 +1037,13 @@ app.post('/api/rentals', authenticateToken, async (req, res) => {
     }
 
     // นับรวมวันเริ่มต้นและวันสิ้นสุด
+    const today = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(new Date());
+    if (start_date < today) {
+        return res.status(400).json({ success: false, error: 'วันเริ่มเช่าต้องไม่เป็นวันที่ผ่านมาแล้ว' });
+    }
+
     const totalDays =
         Math.round((end.getTime() - start.getTime()) / 86400000) + 1;
 
@@ -1014,6 +1083,17 @@ app.post('/api/rentals', authenticateToken, async (req, res) => {
                 success: false,
                 error: 'ไม่สามารถเช่าสินค้าของตัวเองได้'
             });
+        }
+
+        const overlapping = await client.query(`
+            SELECT 1 FROM rentals WHERE item_id = $1
+              AND status IN ('approved', 'borrowing', 'return_requested', 'inspection_pending', 'fine_pending')
+              AND start_date::date <= $3::date AND end_date::date >= $2::date
+            LIMIT 1
+        `, [item_id, start_date, end_date]);
+        if (overlapping.rows.length) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ success: false, error: 'สิ่งของนี้มีการจองในช่วงวันที่เลือกแล้ว' });
         }
 
         // ใช้ราคาจากฐานข้อมูล ไม่เชื่อราคาที่ Frontend ส่งมา
@@ -1284,6 +1364,14 @@ app.patch('/api/rentals/:id/status', authenticateToken, async (req, res) => {
 
 
         // ตรวจสอบสิทธิ์และสถานะของรายการเช่าทุกครั้ง
+        // Serialize approvals for the same item, including separate pending requests.
+        if (status === 'approved') {
+            await client.query(`
+                SELECT i.item_id FROM items i
+                JOIN rentals r ON r.item_id = i.item_id
+                WHERE r.rental_id = $1 FOR UPDATE OF i
+            `, [id]);
+        }
         const rentalCheck = await client.query(`
     SELECT
         r.rental_id,
@@ -1380,6 +1468,19 @@ app.patch('/api/rentals/:id/status', authenticateToken, async (req, res) => {
 
         // อนุมัติได้ก็ต่อเมื่อทั้งสองฝ่ายยอมรับสัญญาแล้ว
         if (status === 'approved') {
+            const overlapping = await client.query(`
+                SELECT 1 FROM rentals other
+                JOIN rentals target ON target.rental_id = $1
+                WHERE other.item_id = target.item_id AND other.rental_id <> target.rental_id
+                  AND other.status IN ('approved', 'borrowing', 'return_requested', 'inspection_pending', 'fine_pending')
+                  AND other.start_date::date <= target.end_date::date
+                  AND other.end_date::date >= target.start_date::date
+                LIMIT 1
+            `, [id]);
+            if (overlapping.rows.length) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({ success: false, error: 'สิ่งของนี้มีการจองในช่วงวันที่เลือกแล้ว' });
+            }
             if (
                 !currentRental.borrower_accepted ||
                 !currentRental.lender_accepted
@@ -1752,16 +1853,12 @@ app.patch('/api/rentals/:id/fine/confirm', authenticateToken, async (req, res) =
     }
 });
 // 4. ดึงข้อมูลผู้ใช้ทั้งหมด (Users)
-app.get('/api/users', async (req, res) => {
-    try {
-        const result = await pool.query(
-            'SELECT user_id, email, full_name, phone_number, trust_score, status, created_at FROM users'
-        );
-        res.json(result.rows);
-    } catch (err) {
-        console.error(err);
-        res.status(500).send('Database Error');
-    }
+// ปิดการเปิดเผยรายชื่อและข้อมูลส่วนตัวของผู้ใช้ทั้งหมด
+app.get('/api/users', authenticateToken, (req, res) => {
+    return res.status(403).json({
+        success: false,
+        error: 'ไม่อนุญาตให้เข้าถึงรายชื่อผู้ใช้ทั้งหมด'
+    });
 });
 
 // Import Routes จากโฟลเดอร์ routes
@@ -1784,6 +1881,9 @@ app.use('/api/rental-payments', rentalPaymentsRouter(pool));
 app.get('/api/items/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+            return res.status(400).json({ success: false, error: 'รหัสสินค้าไม่ถูกต้อง' });
+        }
 
         const result = await pool.query(`
             SELECT
@@ -1828,6 +1928,7 @@ app.get('/api/items/:id', async (req, res) => {
                 ON items.item_id = b.item_id
 
             WHERE items.item_id = $1
+              AND items.status <> 'hidden'
             LIMIT 1
         `, [id]);
 
@@ -1888,6 +1989,9 @@ const bcrypt = require('bcrypt');
 app.get('/api/items/:id/reviews', async (req, res) => {
     try {
         const { id } = req.params;
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+            return res.status(400).json({ success: false, error: 'รหัสสินค้าไม่ถูกต้อง' });
+        }
 
         const result = await pool.query(`
             SELECT
@@ -1928,6 +2032,7 @@ app.post(
         reviewUpload.array('photos', 5)(req, res, (err) => {
             if (err) {
                 console.error('Review upload error:', err);
+                for (const file of req.files || []) fs.unlink(file.path, () => {});
 
                 return res.status(400).json({
                     success: false,
@@ -1939,6 +2044,8 @@ app.post(
     },
     async (req, res) => {
         const uploadedFiles = req.files || [];
+        let client;
+        let committed = false;
 
         const cleanupFiles = () => {
             uploadedFiles.forEach(file => {
@@ -1951,8 +2058,10 @@ app.post(
             const reviewerId = req.user.userId;
             const numericRating = Number(rating);
 
-            if (!rental_id || !Number.isInteger(numericRating) ||
-                numericRating < 1 || numericRating > 5) {
+            if (typeof rental_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rental_id) ||
+                !Number.isInteger(numericRating) || numericRating < 1 || numericRating > 5 ||
+                typeof comment !== 'string' || !comment.trim() || comment.trim().length > 3000 ||
+                !uploadedFiles.every(validItemImageFile)) {
                 cleanupFiles();
                 return res.status(400).json({
                     success: false,
@@ -1960,15 +2069,19 @@ app.post(
                 });
             }
 
-            const rentalCheck = await pool.query(`
+            client = await pool.connect();
+            await client.query('BEGIN');
+            const rentalCheck = await client.query(`
                 SELECT
                     r.rental_id,
                     r.borrower_id,
                     r.status,
-                    i.lender_id
+                    i.lender_id,
+                    i.title AS item_title
                 FROM rentals r
                 JOIN items i ON r.item_id = i.item_id
                 WHERE r.rental_id = $1
+                FOR UPDATE OF r
             `, [rental_id]);
 
             if (rentalCheck.rows.length === 0) {
@@ -1997,7 +2110,7 @@ app.post(
                 });
             }
 
-            const existing = await pool.query(`
+            const existing = await client.query(`
                 SELECT review_id
                 FROM reviews
                 WHERE rental_id = $1 AND reviewer_id = $2
@@ -2012,11 +2125,14 @@ app.post(
                 });
             }
 
+            await storage.persist('reviews', uploadedFiles);
             const photoUrls = uploadedFiles.map(
                 file => `/uploads/reviews/${file.filename}`
             );
 
-            const result = await pool.query(`
+            // Serialize ratings for a recipient so concurrent reviews cannot leave a stale average.
+            await client.query('SELECT user_id FROM users WHERE user_id=$1 FOR UPDATE', [rental.lender_id]);
+            const result = await client.query(`
                 INSERT INTO reviews (
                     review_id,
                     rental_id,
@@ -2043,6 +2159,14 @@ app.post(
                 JSON.stringify(photoUrls)
             ]);
 
+            await client.query(`UPDATE users SET trust_score = (
+                SELECT ROUND(AVG(rating)::numeric, 2) FROM reviews WHERE reviewee_id = $1
+            ), updated_at = NOW() WHERE user_id = $1`, [rental.lender_id]);
+            await client.query(`INSERT INTO notifications (user_id, title, message, type)
+                VALUES ($1, $2, $3, 'review')`, [rental.lender_id, 'ได้รับรีวิวใหม่', `คุณได้รับรีวิวสำหรับ "${rental.item_title}"`]);
+            await client.query('COMMIT');
+            committed = true;
+
             return res.status(201).json({
                 success: true,
                 message: 'เพิ่มรีวิวพร้อมรูปภาพสำเร็จ',
@@ -2057,6 +2181,11 @@ app.post(
                 success: false,
                 error: 'ไม่สามารถบันทึกรีวิวได้'
             });
+        } finally {
+            if (client) {
+                if (!committed) await client.query('ROLLBACK').catch(() => {});
+                client.release();
+            }
         }
     }
 );
@@ -2097,6 +2226,30 @@ app.get('/api/notifications', authenticateToken, async (req, res) => {
         });
     }
 });
+app.get('/api/rentals/:id/photo-file/:filename', authenticateToken, async (req, res) => {
+    const { id, filename } = req.params;
+    if (!/^[0-9a-f-]{36}$/i.test(id) || !/^[0-9a-f-]{36}\.(jpg|png)$/i.test(filename)) {
+        return res.status(400).json({ success: false, error: 'รหัสรูปภาพไม่ถูกต้อง' });
+    }
+    try {
+        const access = await pool.query(`
+            SELECT 1 FROM rental_inspections ri
+            JOIN rentals r ON r.rental_id = ri.rental_id
+            JOIN items i ON i.item_id = r.item_id
+            WHERE r.rental_id = $1 AND (r.borrower_id = $2 OR i.lender_id = $2)
+              AND ri.photo_urls @> $3::jsonb LIMIT 1
+        `, [id, req.user.userId, JSON.stringify([`/uploads/rentals/${filename}`])]);
+        if (!access.rows.length) {
+            return res.status(403).json({ success: false, error: 'ไม่มีสิทธิ์ดูรูปภาพนี้' });
+        }
+        res.set('Cache-Control', 'private, no-store');
+        return storage.send(res, 'rentals', filename);
+    } catch (error) {
+        console.error('Read rental photo error:', error);
+        return res.status(500).json({ success: false, error: 'ไม่สามารถเปิดรูปภาพได้' });
+    }
+});
+
 app.get('/api/rentals/:id/photos', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
@@ -2293,7 +2446,46 @@ app.put('/api/bank-accounts/me', authenticateToken, async (req, res) => {
         });
     }
 });
+
 app.use('/api/admin', require('./routes/admin')(pool));
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+
+// ระบบข้อพิพาทสำหรับผู้เช่าและผู้ให้เช่า
+app.use('/api/disputes', require('./routes/disputes')(pool));
+
+app.get('/api/health', async (req, res) => {
+    try {
+        await pool.query('SELECT 1');
+        await storage.ready();
+        res.json({ success: true, status: 'ready' });
+    } catch {
+        res.status(503).json({ success: false, status: 'unavailable' });
+    }
 });
+if (serveFrontend) {
+    app.use(express.static(frontendDist, { index: false }));
+    app.get(/^(?!\/(?:api|uploads)(?:\/|$)).*/, (req, res, next) => {
+        if (path.extname(req.path) || !req.accepts('html')) return next();
+        res.set('Cache-Control', 'no-store');
+        res.sendFile(path.join(frontendDist, 'index.html'));
+    });
+}
+app.use((req, res) => res.status(404).json({ success: false, error: 'ไม่พบหน้าหรือบริการที่เรียกใช้' }));
+app.use((error, req, res, next) => {
+    if (res.headersSent) return next(error);
+    console.error('Request error:', error.message);
+    res.status(error.status >= 400 && error.status < 500 ? error.status : 500).json({ success: false, error: 'ไม่สามารถดำเนินการคำขอนี้ได้' });
+});
+let server;
+async function start() {
+    if (production) { await pool.query('SELECT 1'); await storage.ready(); }
+    server = app.listen(PORT, process.env.HOST || '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
+    server.on('error', error => { console.error('Server startup failed:', error.code); process.exitCode = 1; pool.end(); });
+}
+start().catch(error => { console.error('Server startup failed:', error.code || error.message); process.exitCode = 1; pool.end(); });
+const shutdown = () => {
+    if (!server) return;
+    server.close(() => pool.end().then(() => process.exit(0)));
+    setTimeout(() => process.exit(1), 10000).unref();
+};
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
