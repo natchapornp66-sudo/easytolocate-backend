@@ -28,7 +28,7 @@
 
 | ช่อง | ค่า |
 |---|---|
-| Build command | `npm ci && npm run build` |
+| Build command | `npm ci --include=dev && npm run build` |
 | Publish directory | `dist` |
 | NODE_VERSION | `24.13.0` |
 | VITE_API_URL | เว้นว่างชั่วคราว จากนั้นใส่ URL backend แล้ว rebuild |
