@@ -195,7 +195,7 @@ app.post(
         }
 
         try {
-            // 2. ดึงข้อมูลผู้เช่าและเจ้าของสินค้า
+            // 2. ดึงข้อมูลผู้เช่าและเจ้าของสิ่งของ
             const rentalResult = await pool.query(`
                 SELECT
                     r.borrower_id,
@@ -326,7 +326,7 @@ app.post(
     }
 );
 
-// 1. ดึงรายการสินค้าทั้งหมด (Items)
+// 1. ดึงรายการสิ่งของทั้งหมด (Items)
 app.get('/api/items', async (req, res) => {
     try {
         const result = await pool.query(`
@@ -393,7 +393,7 @@ app.get('/api/items', async (req, res) => {
 
 // =====================================
 // POST /api/upload/item-images
-// อัปโหลดรูปภาพสินค้า สูงสุด 5 รูป
+// อัปโหลดรูปภาพสิ่งของ สูงสุด 5 รูป
 // =====================================
 
 app.post('/api/upload/item-images', authenticateToken, (req, res) => {
@@ -471,7 +471,7 @@ app.get('/api/my-items', authenticateToken, async (req, res) => {
     }
 });
 
-// API แก้ไขโพสต์สินค้า (เฉพาะเจ้าของโพสต์)
+// API แก้ไขโพสต์สิ่งของ (เฉพาะเจ้าของโพสต์)
 app.put('/api/items/:id', authenticateToken, async (req, res) => {
     try {
         const itemId = req.params.id;
@@ -499,7 +499,7 @@ app.put('/api/items/:id', authenticateToken, async (req, res) => {
         ) {
             return res.status(400).json({
                 success: false,
-                error: 'กรุณากรอกข้อมูลสินค้าให้ครบถ้วน'
+                error: 'กรุณากรอกข้อมูลสิ่งของให้ครบถ้วน'
             });
         }
 
@@ -510,11 +510,11 @@ app.put('/api/items/:id', authenticateToken, async (req, res) => {
         if (!uuidRegex.test(itemId)) {
             return res.status(400).json({
                 success: false,
-                error: 'รหัสสินค้าไม่ถูกต้อง'
+                error: 'รหัสสิ่งของไม่ถูกต้อง'
             });
         }
 
-        // แก้ไขได้เฉพาะสินค้าที่เป็นของผู้ใช้คนนี้
+        // แก้ไขได้เฉพาะสิ่งของที่เป็นของผู้ใช้คนนี้
         const result = await pool.query(`
             UPDATE items
             SET
@@ -538,7 +538,7 @@ app.put('/api/items/:id', authenticateToken, async (req, res) => {
         if (result.rows.length === 0) {
             return res.status(404).json({
                 success: false,
-                error: 'ไม่พบสินค้าหรือคุณไม่มีสิทธิ์แก้ไข'
+                error: 'ไม่พบสิ่งของหรือคุณไม่มีสิทธิ์แก้ไข'
             });
         }
 
@@ -558,7 +558,7 @@ app.put('/api/items/:id', authenticateToken, async (req, res) => {
     }
 });
 
-// API ลบโพสต์สินค้า (เฉพาะเจ้าของโพสต์)
+// API ลบโพสต์สิ่งของ (เฉพาะเจ้าของโพสต์)
 app.delete('/api/items/:id', authenticateToken, async (req, res) => {
     let client;
     try {
@@ -572,7 +572,7 @@ app.delete('/api/items/:id', authenticateToken, async (req, res) => {
         if (!uuidRegex.test(itemId)) {
             return res.status(400).json({
                 success: false,
-                error: 'รหัสสินค้าไม่ถูกต้อง'
+                error: 'รหัสสิ่งของไม่ถูกต้อง'
             });
         }
 
@@ -581,12 +581,12 @@ app.delete('/api/items/:id', authenticateToken, async (req, res) => {
         const owned = await client.query('SELECT item_id FROM items WHERE item_id=$1 AND lender_id=$2 FOR UPDATE', [itemId, userId]);
         if (!owned.rows.length) {
             await client.query('ROLLBACK');
-            return res.status(404).json({ success: false, error: 'ไม่พบสินค้าหรือคุณไม่มีสิทธิ์ลบ' });
+            return res.status(404).json({ success: false, error: 'ไม่พบสิ่งของหรือคุณไม่มีสิทธิ์ลบ' });
         }
         const history = await client.query('SELECT 1 FROM rentals WHERE item_id=$1 LIMIT 1', [itemId]);
         if (history.rows.length) {
             await client.query('ROLLBACK');
-            return res.status(409).json({ success: false, error: 'สินค้านี้มีประวัติการเช่าแล้ว กรุณาปิดให้เช่าแทนการลบเพื่อรักษาประวัติ' });
+            return res.status(409).json({ success: false, error: 'สิ่งของนี้มีประวัติการเช่าแล้ว กรุณาปิดให้เช่าแทนการลบเพื่อรักษาประวัติ' });
         }
         // Lock the item first, matching rental creation, so a new rental cannot be deleted by a concurrent request.
         const result = await client.query(`
@@ -615,7 +615,7 @@ app.delete('/api/items/:id', authenticateToken, async (req, res) => {
     } finally { if (client) client.release(); }
 });
 
-// API เปิด/ปิดการให้เช่าสินค้า
+// API เปิด/ปิดการให้เช่าสิ่งของ
 app.patch('/api/items/:id/status', authenticateToken, async (req, res) => {
     try {
         const itemId = req.params.id;
@@ -629,7 +629,7 @@ app.patch('/api/items/:id/status', authenticateToken, async (req, res) => {
         if (!uuidRegex.test(itemId)) {
             return res.status(400).json({
                 success: false,
-                error: 'รหัสสินค้าไม่ถูกต้อง'
+                error: 'รหัสสิ่งของไม่ถูกต้อง'
             });
         }
 
@@ -637,11 +637,11 @@ app.patch('/api/items/:id/status', authenticateToken, async (req, res) => {
         if (!['active', 'inactive'].includes(status)) {
             return res.status(400).json({
                 success: false,
-                error: 'สถานะสินค้าต้องเป็น active หรือ inactive เท่านั้น'
+                error: 'สถานะสิ่งของต้องเป็น active หรือ inactive เท่านั้น'
             });
         }
 
-        // อัปเดตเฉพาะสินค้าของผู้ใช้ที่ล็อกอิน
+        // อัปเดตเฉพาะสิ่งของของผู้ใช้ที่ล็อกอิน
         const result = await pool.query(`
             UPDATE items
             SET
@@ -663,7 +663,7 @@ app.patch('/api/items/:id/status', authenticateToken, async (req, res) => {
             }
             return res.status(404).json({
                 success: false,
-                error: 'ไม่พบสินค้าหรือคุณไม่มีสิทธิ์แก้ไขสถานะ'
+                error: 'ไม่พบสิ่งของหรือคุณไม่มีสิทธิ์แก้ไขสถานะ'
             });
         }
 
@@ -680,7 +680,7 @@ app.patch('/api/items/:id/status', authenticateToken, async (req, res) => {
 
         return res.status(500).json({
             success: false,
-            error: 'ไม่สามารถเปลี่ยนสถานะสินค้าได้'
+            error: 'ไม่สามารถเปลี่ยนสถานะสิ่งของได้'
         });
     }
 });
@@ -934,6 +934,9 @@ app.get('/api/rentals', authenticateToken, async (req, res) => {
 });
 
 app.get('/api/rentals/:id', authenticateToken, async (req, res) => {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) {
+        return res.status(400).json({ success: false, error: 'รหัสรายการเช่าไม่ถูกต้อง' });
+    }
     try {
         const rentalId = req.params.id;
         const userId = req.user.userId || req.user.id;
@@ -1016,7 +1019,7 @@ app.post('/api/rentals', authenticateToken, async (req, res) => {
     ) {
         return res.status(400).json({
             success: false,
-            error: 'กรุณาระบุสินค้าและวันที่เช่าให้ถูกต้อง'
+            error: 'กรุณาระบุสิ่งของและวันที่เช่าให้ถูกต้อง'
         });
     }
 
@@ -1063,7 +1066,7 @@ app.post('/api/rentals', authenticateToken, async (req, res) => {
             await client.query('ROLLBACK');
             return res.status(404).json({
                 success: false,
-                error: 'ไม่พบสินค้า'
+                error: 'ไม่พบสิ่งของ'
             });
         }
 
@@ -1073,7 +1076,7 @@ app.post('/api/rentals', authenticateToken, async (req, res) => {
             await client.query('ROLLBACK');
             return res.status(400).json({
                 success: false,
-                error: 'สินค้านี้ยังไม่เปิดให้เช่า'
+                error: 'สิ่งของนี้ยังไม่เปิดให้เช่า'
             });
         }
 
@@ -1081,7 +1084,7 @@ app.post('/api/rentals', authenticateToken, async (req, res) => {
             await client.query('ROLLBACK');
             return res.status(400).json({
                 success: false,
-                error: 'ไม่สามารถเช่าสินค้าของตัวเองได้'
+                error: 'ไม่สามารถเช่าสิ่งของของตัวเองได้'
             });
         }
 
@@ -1104,7 +1107,7 @@ app.post('/api/rentals', authenticateToken, async (req, res) => {
             await client.query('ROLLBACK');
             return res.status(400).json({
                 success: false,
-                error: 'ราคาสินค้าไม่ถูกต้อง'
+                error: 'ราคาสิ่งของไม่ถูกต้อง'
             });
         }
 
@@ -1187,7 +1190,7 @@ app.post('/api/rentals', authenticateToken, async (req, res) => {
             )
         `, [
             item.lender_id,
-            'คำขอเช่าสินค้าใหม่',
+            'คำขอเช่าสิ่งของใหม่',
             `มีผู้ใช้ส่งคำขอเช่า "${item.title}"`,
             'rental_request'
         ]);
@@ -1590,7 +1593,7 @@ app.patch('/api/rentals/:id/status', authenticateToken, async (req, res) => {
 
         const rental = result.rows[0];
 
-        // ดึงชื่อสินค้า
+        // ดึงชื่อสิ่งของ
         const itemResult = await client.query(`
             SELECT title
             FROM items
@@ -1598,7 +1601,7 @@ app.patch('/api/rentals/:id/status', authenticateToken, async (req, res) => {
         `, [rental.item_id]);
 
         const itemTitle =
-            itemResult.rows[0]?.title || 'สินค้า';
+            itemResult.rows[0]?.title || 'สิ่งของ';
 
         // =========================
         // Notification
@@ -1785,7 +1788,7 @@ app.patch('/api/rentals/:id/fine/confirm', authenticateToken, async (req, res) =
 
         const rental = result.rows[0];
 
-        // ดึงข้อมูลเจ้าของสินค้าและชื่อสินค้า
+        // ดึงข้อมูลเจ้าของสิ่งของและชื่อสิ่งของ
         const itemResult = await client.query(`
             SELECT
                 title,
@@ -1798,7 +1801,7 @@ app.patch('/api/rentals/:id/fine/confirm', authenticateToken, async (req, res) =
         const item = itemResult.rows[0];
 
         if (item) {
-            // แจ้งเตือนเจ้าของสินค้าเมื่อผู้เช่ายืนยันค่าปรับ
+            // แจ้งเตือนเจ้าของสิ่งของเมื่อผู้เช่ายืนยันค่าปรับ
             await client.query(`
                 INSERT INTO notifications (
                     notification_id,
@@ -1882,7 +1885,7 @@ app.get('/api/items/:id', async (req, res) => {
     try {
         const { id } = req.params;
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
-            return res.status(400).json({ success: false, error: 'รหัสสินค้าไม่ถูกต้อง' });
+            return res.status(400).json({ success: false, error: 'รหัสสิ่งของไม่ถูกต้อง' });
         }
 
         const result = await pool.query(`
@@ -1967,7 +1970,9 @@ app.get('/api/items/:id', async (req, res) => {
 
             image_url: finalImage,
             image: finalImage,
-            images: [finalImage],
+            images: Array.isArray(rawItem.images) && rawItem.images.length
+                ? rawItem.images.map(image => typeof image === 'string' && !image.startsWith('http') && !image.startsWith('/') ? `/uploads/${image}` : image)
+                : [finalImage],
 
 
         };
@@ -1984,13 +1989,13 @@ app.get('/api/items/:id', async (req, res) => {
 });
 const bcrypt = require('bcrypt');
 
-// 6. ดึงรีวิวจริงของสินค้า
-// 6.1 ดึงรีวิวของสินค้า พร้อมรูปภาพ
+// 6. ดึงรีวิวจริงของสิ่งของ
+// 6.1 ดึงรีวิวของสิ่งของ พร้อมรูปภาพ
 app.get('/api/items/:id/reviews', async (req, res) => {
     try {
         const { id } = req.params;
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
-            return res.status(400).json({ success: false, error: 'รหัสสินค้าไม่ถูกต้อง' });
+            return res.status(400).json({ success: false, error: 'รหัสสิ่งของไม่ถูกต้อง' });
         }
 
         const result = await pool.query(`
@@ -2477,6 +2482,7 @@ app.use((error, req, res, next) => {
 });
 let server;
 async function start() {
+    await require('./scripts/migrate-profile.cjs')(pool);
     if (production) { await pool.query('SELECT 1'); await storage.ready(); }
     server = app.listen(PORT, process.env.HOST || '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
     server.on('error', error => { console.error('Server startup failed:', error.code); process.exitCode = 1; pool.end(); });

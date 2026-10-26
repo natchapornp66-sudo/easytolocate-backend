@@ -8,7 +8,7 @@ module.exports = (pool) => {
     router.get('/me', authenticateToken, async (req, res) => {
         try {
             const result = await pool.query(`
-                SELECT user_id, full_name, email, phone_number, trust_score, role, status, created_at
+                SELECT user_id, full_name, email, phone_number, address, latitude, longitude, trust_score, role, status, created_at
                 FROM users WHERE user_id = $1
             `, [req.user.userId]);
             const completed = await pool.query(`
@@ -52,26 +52,40 @@ module.exports = (pool) => {
     });
     // 1. API สมัครสมาชิก
     router.post('/register', async (req, res) => {
-        const { full_name, email, phone_number, password } = req.body;
+        const { full_name, phone_number, password, address, latitude, longitude } = req.body || {};
+        const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+        const hasLocation = latitude != null || longitude != null;
+        if (typeof full_name !== 'string' || !full_name.trim() || full_name.trim().length > 100 ||
+            email.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+            typeof password !== 'string' || password.length < 6 || Buffer.byteLength(password, 'utf8') > 72 ||
+            (phone_number != null && phone_number !== '' && (typeof phone_number !== 'string' || !/^[0-9]{9,15}$/.test(phone_number))) ||
+            (address != null && (typeof address !== 'string' || address.trim().length > 2000)) ||
+            (hasLocation && (typeof latitude !== 'number' || !Number.isFinite(latitude) || Math.abs(latitude) > 90 ||
+                typeof longitude !== 'number' || !Number.isFinite(longitude) || Math.abs(longitude) > 180))) {
+            return res.status(400).json({ success: false, error: 'กรุณาระบุข้อมูลสมัครให้ถูกต้อง รหัสผ่านอย่างน้อย 6 ตัวอักษรและไม่เกิน 72 ไบต์' });
+        }
+        let client, committed = false;
         try {
+            const password_hash = await bcrypt.hash(password, 10);
+            client = await pool.connect();
+            await client.query('BEGIN');
+            // Serialize registrations for the same normalized email across all app instances.
+            await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [email]);
             // ตรวจสอบว่ามีอีเมลนี้ในระบบหรือยัง
-            const userCheck = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+            const userCheck = await client.query('SELECT user_id FROM users WHERE LOWER(BTRIM(email)) = $1', [email]);
             if (userCheck.rows.length > 0) {
                 return res.status(400).json({ success: false, error: 'อีเมลนี้ถูกใช้งานแล้ว' });
             }
 
-            // เข้ารหัสรหัสผ่าน (Hash Password)
-            const saltRounds = 10;
-            const password_hash = await bcrypt.hash(password, saltRounds);
-
             // บันทึกลงตาราง users
-            const newUser = await pool.query(
-                `INSERT INTO users (user_id, full_name, email, phone_number, password_hash, created_at, updated_at)
- VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW())
+            const newUser = await client.query(
+                `INSERT INTO users (user_id, full_name, email, phone_number, password_hash, address, latitude, longitude, created_at, updated_at)
+ VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
  RETURNING user_id, full_name, email, phone_number`,
-                [full_name, email, phone_number || null, password_hash]
+                [full_name.trim(), email, phone_number || null, password_hash, address?.trim() || null, latitude ?? null, longitude ?? null]
             );
-
+            await client.query('COMMIT');
+            committed = true;
             res.status(201).json({ success: true, data: newUser.rows[0] });
         } catch (err) {
             console.error('Register Error:', err);
@@ -79,20 +93,29 @@ module.exports = (pool) => {
                 success: false,
                 error: 'เกิดข้อผิดพลาดภายในระบบ'
             });
+        } finally {
+            if (client) { if (!committed) await client.query('ROLLBACK').catch(() => {}); client.release(); }
         }
     });
 
     // 2. API เข้าสู่ระบบ
     router.post('/login', async (req, res) => {
-        const { email, password } = req.body;
+        const { password } = req.body || {};
+        const originalEmail = typeof req.body?.email === 'string' ? req.body.email.trim() : '';
+        const email = originalEmail.toLowerCase();
+        if (!email || email.length > 255 || typeof password !== 'string' || !password || Buffer.byteLength(password, 'utf8') > 72) {
+            return res.status(400).json({ success: false, error: 'กรุณาระบุอีเมลและรหัสผ่านที่ถูกต้อง รหัสผ่านต้องไม่เกิน 72 ไบต์' });
+        }
         try {
             // ค้นหาผู้ใช้จากอีเมล
-            const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+            const result = await pool.query('SELECT * FROM users WHERE LOWER(BTRIM(email)) = $1', [email]);
             if (result.rows.length === 0) {
                 return res.status(400).json({ success: false, error: 'ไม่พบอีเมลนี้ในระบบ' });
             }
 
-            const user = result.rows[0];
+            // Preserve distinct legacy accounts; never silently merge case-variant emails.
+            const user = result.rows.find(row => row.email.trim() === originalEmail) || (result.rows.length === 1 ? result.rows[0] : null);
+            if (!user) return res.status(400).json({ success: false, error: 'กรุณากรอกอีเมลตรงตามที่สมัคร เนื่องจากมีบัญชีเดิมต่างตัวพิมพ์' });
 
             // ตรวจสอบรหัสผ่าน
             const isValidPassword = await bcrypt.compare(password, user.password_hash);

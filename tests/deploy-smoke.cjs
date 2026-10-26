@@ -104,7 +104,7 @@ async function main() {
     check('session survives restart', (await api('/auth/me', 'GET', undefined, token)).status, 200);
     await run('scripts/grant-admin.cjs', [credentials.email]);
     check('first administrator setup on new installation', (await api('/admin/users', 'GET', undefined, token)).status, 200);
-    for (const suite of ['rental', 'dispute-admin', 'profile-verification', 'items', 'chat-review']) {
+    for (const suite of ['rental', 'dispute-admin', 'profile-verification', 'items', 'chat-review', 'system-fixes']) {
         await run('tests/' + suite + '-regression.cjs');
         const result = JSON.parse(fs.readFileSync(path.join(root, suite + '-regression-result.json'), 'utf8'));
         check(suite + ' regression (' + result.results.length + ' checks)', result.results.every(r => r.pass), true);

@@ -422,6 +422,9 @@ CREATE TABLE public.user_verifications (
 --
 
 CREATE TABLE public.users (
+    address text,
+    latitude numeric(10,7),
+    longitude numeric(10,7),
     user_id uuid DEFAULT gen_random_uuid() NOT NULL,
     email character varying(255) NOT NULL,
     full_name character varying(255) NOT NULL,

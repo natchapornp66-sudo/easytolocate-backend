@@ -15,6 +15,7 @@ async function main() {
     const pool = new Pool(databaseOptions);
     try {
         const current = await pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public'");
+        if (current.rows.some(row => row.table_name === 'users')) await require('./migrate-profile.cjs')(pool);
         await command(['scripts/database.cjs', ...(current.rowCount === 0 ? ['--init'] : [])]);
         // Backend connects as table owner/postgres. Browser/Data API roles must not read app tables.
         const client = await pool.connect();

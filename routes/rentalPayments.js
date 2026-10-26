@@ -7,6 +7,15 @@ const crypto = require('crypto');
 const { uploadRoot } = require('../config');
 const storageService = require('../storage');
 const authenticateToken = require('../middleware/authMiddleware');
+function validSlipFile(file) {
+    const fd = fs.openSync(file.path, 'r');
+    try {
+        const b = Buffer.alloc(12), n = fs.readSync(fd, b, 0, 12, 0);
+        if (file.mimetype === 'image/png') return n >= 8 && b.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'));
+        if (file.mimetype === 'image/jpeg') return n >= 3 && b[0] === 255 && b[1] === 216 && b[2] === 255;
+        return file.mimetype === 'image/webp' && n >= 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP';
+    } finally { fs.closeSync(fd); }
+}
 
 module.exports = (pool) => {
     const router = express.Router();
@@ -17,7 +26,8 @@ module.exports = (pool) => {
     const storage = multer.diskStorage({
         destination: (req, file, cb) => cb(null, uploadDir),
         filename: (req, file, cb) => {
-            cb(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase()}`);
+            const extension = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp' }[file.mimetype];
+            cb(null, `${crypto.randomUUID()}${extension || ''}`);
         },
     });
 
@@ -127,15 +137,22 @@ module.exports = (pool) => {
                 fs.unlink(req.file.path, () => { });
             };
 
+            let client, committed = false;
             try {
+                if (!validSlipFile(req.file)) {
+                    removeFile();
+                    return res.status(400).json({ success: false, error: 'ไฟล์สลิปต้องเป็นรูปภาพ JPG, PNG หรือ WebP จริง' });
+                }
                 const userId = req.user.userId || req.user.id;
                 const rentalId = req.params.rentalId;
-
-                const rentalResult = await pool.query(`
-          SELECT r.borrower_id, r.total_price, i.lender_id
+                client = await pool.connect();
+                await client.query('BEGIN');
+                const rentalResult = await client.query(`
+          SELECT r.borrower_id, r.total_price, r.status, r.payment_status, i.lender_id
           FROM rentals r
           JOIN items i ON i.item_id = r.item_id
           WHERE r.rental_id = $1
+          FOR UPDATE OF r
         `, [rentalId]);
 
                 if (!rentalResult.rows.length) {
@@ -153,7 +170,11 @@ module.exports = (pool) => {
                     });
                 }
 
-                const bankResult = await pool.query(`
+                if (rental.status !== 'approved' || rental.payment_status === 'paid') {
+                    removeFile();
+                    return res.status(409).json({ success: false, error: 'รายการเช่านี้ไม่อยู่ในสถานะรอชำระค่าเช่า' });
+                }
+                const bankResult = await client.query(`
           SELECT bank_account_id
           FROM user_bank_accounts
           WHERE user_id = $1
@@ -169,7 +190,7 @@ module.exports = (pool) => {
                     });
                 }
 
-                const existing = await pool.query(`
+                const existing = await client.query(`
           SELECT payment_id, status
           FROM rental_payments
           WHERE rental_id = $1 AND payment_type = 'rental'
@@ -188,7 +209,7 @@ module.exports = (pool) => {
                 await storageService.persist('payments', [req.file]);
                 const slipUrl = `/uploads/payments/${req.file.filename}`;
 
-                const result = await pool.query(`
+                const result = await client.query(`
           INSERT INTO rental_payments (
             payment_id, rental_id, payment_type, amount,
             bank_account_id, slip_url, status, submitted_by,
@@ -207,6 +228,8 @@ module.exports = (pool) => {
                     userId,
                 ]);
 
+                await client.query('COMMIT');
+                committed = true;
                 return res.status(201).json({
                     success: true,
                     data: result.rows[0],
@@ -218,6 +241,8 @@ module.exports = (pool) => {
                     success: false,
                     error: 'อัปโหลดสลิปไม่สำเร็จ',
                 });
+            } finally {
+                if (client) { if (!committed) await client.query('ROLLBACK').catch(() => {}); client.release(); }
             }
         });
     });
@@ -252,6 +277,10 @@ module.exports = (pool) => {
             let client;
 
             try {
+                if (!validSlipFile(req.file)) {
+                    removeFile();
+                    return res.status(400).json({ success: false, error: 'ไฟล์สลิปต้องเป็นรูปภาพ JPG, PNG หรือ WebP จริง' });
+                }
                 const userId = req.user.userId || req.user.id;
                 const rentalId = req.params.rentalId;
 
@@ -480,6 +509,7 @@ module.exports = (pool) => {
                     r.rental_id,
                     r.status,
                     r.fine_status,
+                    r.payment_status,
                     i.lender_id
                 FROM rentals r
                 JOIN items i ON i.item_id = r.item_id
@@ -524,6 +554,11 @@ module.exports = (pool) => {
             }
 
             const payment = paymentResult.rows[0];
+            if (payment.payment_type === 'rental' && action === 'verify' &&
+                (rental.status !== 'approved' || rental.payment_status === 'paid')) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({ success: false, error: 'รายการเช่านี้ไม่อยู่ในสถานะรอตรวจรับค่าเช่า' });
+            }
 
             if (!['rental', 'fine'].includes(payment.payment_type)) {
                 await client.query('ROLLBACK');
@@ -616,7 +651,7 @@ module.exports = (pool) => {
                         SET
                             payment_status = 'paid',
                             updated_at = NOW()
-                        WHERE rental_id = $1
+                        WHERE rental_id = $1 AND status = 'approved'
                     `, [rental.rental_id]);
                 }
 
